@@ -1,0 +1,56 @@
+name: 'C++ CI'
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write      # даёт GITHUB_TOKEN право создавать релизы и пушить теги
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Project checkout
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+      - name: GTest download
+        run: git clone https://github.com/google/googletest.git googletest
+      - name: GTest compile and install
+        working-directory: ./googletest
+        run: |
+          sudo cmake .
+          sudo cmake --build . --target install
+      - name: Get version
+        run: |
+          PROJECT_VERSION="${{ github.ref_name }}"
+          echo "PROJECT_VERSION=${PROJECT_VERSION#v}" >> $GITHUB_ENV
+      - name: Project build
+        run: |
+          cmake . -DPROJECT_VERSION=${{ env.PROJECT_VERSION }} -DCMAKE_BUILD_TYPE=Release
+          cmake --build .
+          cmake --build . --target test
+          cmake --build . --target package
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+      - name: Upload Release Asset
+        id: upload-release-asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./messenger-${{ env.PROJECT_VERSION }}-Linux.deb
+          asset_name: messenger-${{ env.PROJECT_VERSION }}-Linux.deb
+          asset_content_type: application/vnd.debian.binary-package

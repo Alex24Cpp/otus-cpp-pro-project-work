@@ -1,0 +1,11 @@
+BasedOnStyle: Google
+Language: Cpp
+IndentWidth: 4
+TabWidth: 4
+# UseTab: ForContinuationAndIndentation
+IndentAccessModifiers: false
+AccessModifierOffset: -4
+EmptyLineAfterAccessModifier: Never
+EmptyLineBeforeAccessModifier: Never
+# AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None

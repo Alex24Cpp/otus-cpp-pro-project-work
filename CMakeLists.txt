@@ -17,14 +17,25 @@ if (CLANG-TIDY)
 endif()
 
 add_executable(messenger
-    src/p2p_chat.cpp
-    src/p2p_error.cpp
-    src/p2p_error.h
+    src/messenger.cpp
+
+    src/app/p2p_chat.cpp
+    src/app/p2p_chat.h
+
+    src/utils/p2p_error.cpp
+    src/utils/p2p_error.h
+
+    src/net/raii_socket.cpp
+    src/net/raii_socket.h
+    src/net/client_socket.cpp
+    src/net/client_socket.h
+    src/net/server_socket.cpp
+    src/net/server_socket.h
 )
 add_executable(gtest_messenger
     test/gtest_messenger.cpp
-    src/p2p_error.cpp
-    src/p2p_error.h
+    src/utils/p2p_error.cpp
+    src/utils/p2p_error.h
 )
 
 set_target_properties(
@@ -33,6 +44,10 @@ set_target_properties(
     PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
+)
+
+target_include_directories(messenger
+    PRIVATE src
 )
 
 target_include_directories(gtest_messenger

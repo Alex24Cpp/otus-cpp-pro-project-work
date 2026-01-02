@@ -17,6 +17,8 @@ FormatStyle: none
 CheckOptions:
   - {key: modernize-use-nullptr.NullMacros, value: 'NULL'}
   - {key: readability-identifier-naming.VariableCase, value: lower_case}
+  - {key: readability-identifier-naming.ConstantCase, value: lower_case}
+  - {key: readability-identifier-naming.ConstexprVariableCase, value: UPPER_CASE}
   - {key: readability-identifier-naming.FunctionCase, value: camelBack}
   - {key: readability-identifier-naming.ParameterCase, value: lower_case}
   - {key: cppcoreguidelines.LanguageStandard, value: c++17}

@@ -36,6 +36,14 @@ add_executable(gtest_messenger
     test/gtest_messenger.cpp
     src/utils/p2p_error.cpp
     src/utils/p2p_error.h
+    src/net/raii_socket.cpp
+    src/net/raii_socket.h
+    src/net/client_socket.cpp
+    src/net/client_socket.h
+    src/net/server_socket.cpp
+    src/net/server_socket.h
+    src/app/p2p_chat.cpp
+    src/app/p2p_chat.h
 )
 
 set_target_properties(

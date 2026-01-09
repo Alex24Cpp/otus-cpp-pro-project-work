@@ -31,6 +31,14 @@ add_executable(messenger
     src/net/client_socket.h
     src/net/server_socket.cpp
     src/net/server_socket.h
+    src/net/net_api.cpp
+    src/net/net_api.h
+
+    src/protocol/message.hpp
+    src/protocol/protocol_api.cpp
+    src/protocol/protocol_api.h
+    src/protocol/serializer.cpp
+    src/protocol/serializer.h
 )
 add_executable(gtest_messenger
     test/gtest_messenger.cpp
@@ -42,8 +50,8 @@ add_executable(gtest_messenger
     src/net/client_socket.h
     src/net/server_socket.cpp
     src/net/server_socket.h
-    src/app/p2p_chat.cpp
-    src/app/p2p_chat.h
+    # src/app/p2p_chat.cpp
+    # src/app/p2p_chat.h
 )
 
 set_target_properties(

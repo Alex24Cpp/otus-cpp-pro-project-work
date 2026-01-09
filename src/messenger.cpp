@@ -40,6 +40,8 @@ int main(int argc, char* argv[]) {
                 argv[2]));  // NOLINT(cppcoreguidelines-pro-bounds-pointer-arithmetic)
             auto sock = net::create_server_socket(port);
             app::chat_loop(std::move(sock));
+            std::cout << "Приложение завершено.\n";
+            return EXIT_SUCCESS;
 
         } else if (mode == "клиент") {
             if (argc != 4) {
@@ -53,6 +55,8 @@ int main(int argc, char* argv[]) {
 
             auto sock = net::create_client_socket(host, port);
             app::chat_loop(std::move(sock));
+            std::cout << "Приложение завершено.\n";
+            return EXIT_SUCCESS;
 
         } else {
             throw std::invalid_argument("Неизвестный режим: " +

@@ -11,19 +11,21 @@ namespace messenger::proto {
 // Формирование байтов для отправки
 
 [[nodiscard]]
-auto send_text(const std::string& text, std::uint32_t id) -> std::vector<std::uint8_t>;
+auto send_text(int socket_fd, const std::string& text, std::uint32_t msg_id) -> bool;
+
+// NOLINTBEGIN(bugprone-easily-swappable-parameters)
+[[nodiscard]]
+auto send_typing(int socket_fd, std::uint32_t msg_id) -> bool;
 
 [[nodiscard]]
-auto send_typing(std::uint32_t id) -> std::vector<std::uint8_t>;
+auto send_ping(int socket_fd, std::uint32_t msg_id) -> bool;
 
 [[nodiscard]]
-auto send_ping(std::uint32_t id) -> std::vector<std::uint8_t>;
+auto send_pong(int socket_fd, std::uint32_t msg_id) -> bool;
 
 [[nodiscard]]
-auto send_pong(std::uint32_t id) -> std::vector<std::uint8_t>;
-
-[[nodiscard]]
-auto send_ack(std::uint32_t id) -> std::vector<std::uint8_t>;
+auto send_ack(int socket_fd, std::uint32_t msg_id) -> bool;
+// NOLINTEND(bugprone-easily-swappable-parameters)
 
 // Приём одного сообщения с сокета.
 //

@@ -10,8 +10,8 @@ namespace messenger::net {
 using MaxPayloadSize = std::integral_constant<std::size_t, 1024U * 1024U>;
 
 // Отправка всех байтов.
-// Возвращает true, если все байты были отправлены, иначе бросает исключение
-// при системной ошибке
+// Возвращает true, если все байты были отправлены.
+// При системной ошибке бросает исключение
 [[nodiscard]]
 auto send_bytes(int socket_fd, const std::vector<std::uint8_t>& data) -> bool;
 
@@ -22,6 +22,7 @@ auto send_bytes(int socket_fd, const std::vector<std::uint8_t>& data) -> bool;
 //  - возвращает true и out пустой → собеседник отключился ДО заголовка.
 //  - возвращает true и out непустой → заголовок прочитан, payload может быть частичным
 //    при обрыве соединения; протокол решает, валидно ли сообщение.
+// При системной ошибке бросает исключение
 [[nodiscard]]
 auto recv_bytes(int socket_fd, std::vector<std::uint8_t>& out) -> bool;
 

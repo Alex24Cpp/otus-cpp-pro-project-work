@@ -9,12 +9,15 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 #include "net/raii_socket.h"
 #include "protocol/message.hpp"
@@ -35,12 +38,31 @@ constexpr int PING_INTERVAL_SECONDS = 10;
 constexpr int PING_TIMEOUT_SECONDS = 3;
 constexpr int MAX_PING_RETRIES = 3;
 
+// Макс. количество хранимых id полученных сообщений
+// При превышении старые идентификаторы удаляются для ограничения роста памяти
+constexpr std::size_t MAX_SEEN_MESSAGE_IDS = 1024U;
+
+// Маска для выделения двух старших битов UTF‑8 байта
+constexpr unsigned char UTF8_LEAD_MASK = 0xC0U;
+
+// Значение двух старших битов для continuation‑byte (10xxxxxx)
+constexpr unsigned char UTF8_CONTINUATION_VALUE = 0x80U;
+
+// Интервал ожидания select() в микросекундах (500 мс)
+constexpr int SELECT_TIMEOUT_USEC = 500000;
+
 struct PendingAck {
     std::uint32_t id{};
     Clock::time_point deadline;
     int retry_count{};
     std::string last_payload;
     bool ping_for_ack_requested{false};
+};
+
+struct OutgoingMessage {
+    std::uint32_t message_id{};
+    std::string payload;
+    bool delivered{};
 };
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
@@ -62,6 +84,10 @@ Clock::time_point last_ping_time = Clock::now();
 Clock::time_point last_pong_time = Clock::now();
 int ping_retry_count = 0;
 
+std::vector<OutgoingMessage> undelivered_messages{};
+
+std::vector<std::string> chat_history{};
+const std::string history_file_path = "chat_history.txt";
 // NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
 
 // Включение raw‑mode терминала
@@ -139,8 +165,116 @@ auto isDuplicate(std::uint32_t msg_id) -> bool {
 void rememberMessageId(std::uint32_t msg_id) {
     seen_message_ids.insert(msg_id);
     // Ограничитель размера для защиты от бесконечного роста
-    if (seen_message_ids.size() > 1024U) {
+    if (seen_message_ids.size() > MAX_SEEN_MESSAGE_IDS) {
         seen_message_ids.clear();
+    }
+}
+
+// Удалять UTF‑8 символы
+void eraseLastUtf8Char(std::string& text) {
+    if (text.empty()) {
+        return;
+    }
+
+    std::size_t index = text.size() - 1;
+
+    // UTF‑8 continuation byte: 10xxxxxx
+    while (index > 0 && (static_cast<unsigned char>(text[index]) &
+                         UTF8_LEAD_MASK) == UTF8_CONTINUATION_VALUE) {
+        --index;
+    }
+
+    text.erase(index);
+}
+
+void resendMessage(int socket_fd, OutgoingMessage& outgoing_message) {
+    const std::uint32_t new_message_id = generateMessageId();
+
+    if (!messenger::proto::send_text(socket_fd, outgoing_message.payload,
+                                     new_message_id)) {
+        std::cout << "\n[Ошибка: не удалось повторно отправить сообщение]\n";
+        return;
+    }
+
+    outgoing_message.message_id = new_message_id;
+    outgoing_message.delivered = false;
+
+    PendingAck ack_state{};
+    ack_state.id = new_message_id;
+    ack_state.deadline =
+        Clock::now() + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
+    ack_state.retry_count = 0;
+    ack_state.last_payload = outgoing_message.payload;
+    pending_ack = ack_state;
+
+    std::cout << "\n[Повторная отправка msg_id=" << new_message_id << "]\n";
+}
+
+// Обработка команды /повтор
+void handleRepeatCommand(int socket_fd, const std::string& command_text) {
+    if (command_text == "/повтор") {
+        std::cout << "\nНедоставленные сообщения:\n";
+        for (const auto& outgoing_message : undelivered_messages) {
+            if (!outgoing_message.delivered) {
+                std::cout << "id=" << outgoing_message.message_id << ": "
+                          << outgoing_message.payload << '\n';
+            }
+        }
+        return;
+    }
+
+    const std::size_t space_pos = command_text.find(' ');
+    if (space_pos == std::string::npos ||
+        space_pos + 1 >= command_text.size()) {
+        std::cout << "\n[Формат: /повтор <id>]\n";
+        return;
+    }
+
+    const std::string id_text = command_text.substr(space_pos + 1);
+    std::uint32_t message_id_value{};
+    try {
+        message_id_value = static_cast<std::uint32_t>(std::stoul(id_text));
+    } catch (const std::exception&) {
+        std::cout << "\n[Некорректный id сообщения]\n";
+        return;
+    }
+
+    for (auto& outgoing_message : undelivered_messages) {
+        if (outgoing_message.message_id == message_id_value &&
+            !outgoing_message.delivered) {
+            resendMessage(socket_fd, outgoing_message);
+            return;
+        }
+    }
+
+    std::cout << "\n[Сообщение с id=" << message_id_value
+              << " не найдено среди недоставленных]\n";
+}
+
+void appendToHistoryFile(const std::string& history_line) {
+    std::ofstream history_file(history_file_path, std::ios::app);
+    if (!history_file) {
+        return;
+    }
+    history_file << history_line << '\n';
+}
+
+void loadHistoryFromFile() {
+    std::ifstream history_file(history_file_path);
+    if (!history_file) {
+        return;
+    }
+
+    std::string history_line;
+    while (std::getline(history_file, history_line)) {
+        chat_history.push_back(history_line);
+    }
+}
+
+void showHistory() {
+    std::cout << "\nИстория сообщений:\n";
+    for (const auto& history_line : chat_history) {
+        std::cout << history_line << '\n';
     }
 }
 
@@ -163,6 +297,10 @@ auto handleIncomingMessage(int sock_fd,
             }
 
             rememberMessageId(msg.id);
+
+            const std::string history_line = "[Собеседник]: " + msg.payload;
+            chat_history.push_back(history_line);
+            appendToHistoryFile(history_line);
 
             clearInputLine();
             std::cout << "\n[Собеседник]: " << msg.payload << "\n";
@@ -232,10 +370,8 @@ void checkAckTimeout(int socket_fd) {
     if (pending_ack->retry_count < MAX_MESSAGE_RETRIES - 1) {
         if (!messenger::proto::send_text(socket_fd, pending_ack->last_payload,
                                          pending_ack->id)) {
-            clearInputLine();
             std::cout
                 << "\n[Ошибка: сообщение не удалось повторно отправить]\n";
-            redrawInput();
             pending_ack.reset();
             return;
         }
@@ -243,10 +379,8 @@ void checkAckTimeout(int socket_fd) {
         pending_ack->retry_count += 1;
         pending_ack->deadline = now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
 
-        clearInputLine();
         std::cout << "\n[Повторная отправка msg_id=" << pending_ack->id
                   << ", попытка " << pending_ack->retry_count << "]\n";
-        redrawInput();
         return;
     }
 
@@ -265,10 +399,8 @@ void checkAckTimeout(int socket_fd) {
     if (pending_ack->retry_count == MAX_MESSAGE_RETRIES - 1) {
         if (!messenger::proto::send_text(socket_fd, pending_ack->last_payload,
                                          pending_ack->id)) {
-            clearInputLine();
             std::cout
                 << "\n[Ошибка: сообщение не удалось отправить повторно]\n";
-            redrawInput();
             pending_ack.reset();
             return;
         }
@@ -276,10 +408,8 @@ void checkAckTimeout(int socket_fd) {
         pending_ack->retry_count += 1;  // retry_count == MAX_MESSAGE_RETRIES
         pending_ack->deadline = now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
 
-        clearInputLine();
         std::cout << "\n[Последняя попытка отправки msg_id=" << pending_ack->id
                   << "]\n";
-        redrawInput();
         return;
     }
 
@@ -289,10 +419,15 @@ void checkAckTimeout(int socket_fd) {
     //  - последний ретрай выполнен,
     //  - checkPingWatchdog() не заявил о потере соединения,
     //  - но ACK так и не пришёл.
-    clearInputLine();
     std::cout << "\n[Сообщение msg_id=" << pending_ack->id
-              << " НЕ доставлено (таймаут)]\n";
-    redrawInput();  // в дальнейшем логирование
+              << " НЕ доставлено (таймаут)]\n";  // в дальнейшем логирование
+
+    for (auto& outgoing_message : undelivered_messages) {
+        if (outgoing_message.message_id == pending_ack->id) {
+            outgoing_message.delivered = false;
+            break;
+        }
+    }
 
     pending_ack.reset();
 }
@@ -311,9 +446,7 @@ auto checkPingWatchdog(int socket_fd) -> bool {
     if (now - last_ping_time >= std::chrono::seconds(PING_INTERVAL_SECONDS) &&
         ping_retry_count < MAX_PING_RETRIES) {
         if (!sendPing(socket_fd)) {
-            clearInputLine();
             std::cout << "\n[Ошибка: не удалось отправить Ping]\n";
-            redrawInput();
             return false;
         }
         last_ping_time = now;
@@ -328,9 +461,7 @@ auto checkPingWatchdog(int socket_fd) -> bool {
     if (ping_retry_count > 0 &&
         now - last_pong_time > std::chrono::seconds(PING_TIMEOUT_SECONDS) &&
         ping_retry_count >= MAX_PING_RETRIES) {
-        clearInputLine();
         std::cout << "\n[Ошибка: соединение потеряно (нет Pong)]\n";
-        redrawInput();
         return false;
     }
 
@@ -347,7 +478,7 @@ void wait_for_events(int sock_fd, fd_set& readfds) {
     // Таймаут, чтобы периодически будиться для Ping/Ack‑таймеров
     timeval t_v{};
     t_v.tv_sec = 0;
-    t_v.tv_usec = 500000;  // 500 мс
+    t_v.tv_usec = SELECT_TIMEOUT_USEC;  // 500 мс
 
     const int ret = ::select(max_fd + 1, &readfds, nullptr, nullptr, &t_v);
     if (ret < 0) {
@@ -381,6 +512,14 @@ bool handle_peer(int socket_fd) {
             clearInputLine();
             std::cout << "\n[Сообщение msg_id=" << msg.id << " доставлено]\n";
             redrawInput();
+
+            for (auto& outgoing_message : undelivered_messages) {
+                if (outgoing_message.message_id == msg.id) {
+                    outgoing_message.delivered = true;
+                    break;
+                }
+            }
+
             pending_ack.reset();
             return true;
         }
@@ -423,6 +562,25 @@ bool handle_user(int socket_fd) {
             return false;
         }
 
+        if (input_buffer.starts_with("/повтор")) {
+            clearInputLine();
+            handleRepeatCommand(socket_fd, input_buffer);
+            input_buffer.clear();
+            typing_sent = false;
+            redrawInput();
+            return true;
+        }
+
+        // Команда показать историю сообщений
+        if (input_buffer == "/история") {
+            clearInputLine();
+            showHistory();
+            input_buffer.clear();
+            typing_sent = false;
+            redrawInput();
+            return true;
+        }
+
         // Отправка обычного сообщения
         if (!input_buffer.empty()) {
             const std::uint32_t msg_id = generateMessageId();
@@ -436,6 +594,11 @@ bool handle_user(int socket_fd) {
             } else {
                 std::cout << "\n[Ожидание подтверждения доставки для msg_id="
                           << msg_id << "]\n";
+
+                const std::string history_line = "[Я]: " + input_buffer;
+                chat_history.push_back(history_line);
+                appendToHistoryFile(history_line);
+
                 // Запуск неблокирующего ожидания Ack: запомнить, что ждём его
                 PendingAck ack_state{};
                 ack_state.id = msg_id;
@@ -444,6 +607,12 @@ bool handle_user(int socket_fd) {
                 ack_state.retry_count = 0;
                 ack_state.last_payload = input_buffer;
                 pending_ack = ack_state;
+
+                OutgoingMessage outgoing_message{};
+                outgoing_message.message_id = msg_id;
+                outgoing_message.payload = input_buffer;
+                outgoing_message.delivered = false;
+                undelivered_messages.push_back(outgoing_message);
             }
 
             input_buffer.clear();
@@ -460,7 +629,7 @@ bool handle_user(int socket_fd) {
     // ====== BACKSPACE ======
     if (key == KEY_BACKSPACE) {
         if (!input_buffer.empty()) {
-            input_buffer.pop_back();
+            eraseLastUtf8Char(input_buffer);
             redrawInput();
         }
         return true;
@@ -489,6 +658,8 @@ void chat_loop(messenger::net::Socket sock) {
     std::signal(SIGABRT, handleExitSignal);  // abort()
 
     const TerminalRawGuard term_guard;
+
+    loadHistoryFromFile();
 
     std::cout << "Чат готов. Печатай сообщение и жми Enter.\n"
               << "Команда выхода: /выход или /exit, а также Ctrl-D.\n\n";

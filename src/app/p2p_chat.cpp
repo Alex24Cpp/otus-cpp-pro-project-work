@@ -51,6 +51,12 @@ constexpr int MAX_PING_RETRIES = 3;
 // При превышении старые идентификаторы удаляются для ограничения роста памяти
 constexpr std::size_t MAX_SEEN_MESSAGE_IDS = 1024U;
 
+// Лимит на количество строк истории чата
+constexpr std::size_t MAX_HISTORY_LINES = 10000U;
+
+// Лимит на размер очереди недоставленных сообщений
+constexpr std::size_t MAX_UNDELIVERED_MESSAGES = 1000U;
+
 // Маска для выделения двух старших битов UTF‑8 байта
 constexpr unsigned char UTF8_LEAD_MASK = 0xC0U;
 
@@ -313,6 +319,9 @@ auto handleIncomingMessage(int sock_fd,
             const std::string history_line = "[Собеседник]: " + msg.payload;
             chat_history.push_back(history_line);
             appendToHistoryFile(history_line);
+            if (chat_history.size() > MAX_HISTORY_LINES) {
+                chat_history.erase(chat_history.begin());
+            }
 
             clearInputLine();
             std::cout << "\n[Собеседник]: " << msg.payload << "\n";
@@ -620,10 +629,10 @@ bool handle_peer(int socket_fd) {
 
     if (!okey) {
         clearInputLine();
-        std::cout << "\n[Ошибка протокола: получено некорректное сообщение]\n";
+        std::cout << "\nФатальная ошибка протокола: повреждённый пакет\n";
         redrawInput();
         // в дальнейшем логирование и/или логика обработки
-        return true;
+        return false;
     }
 
     if (disconnected) {
@@ -744,6 +753,9 @@ bool handle_user(int socket_fd) {
                 const std::string history_line = "[Я]: " + input_buffer;
                 chat_history.push_back(history_line);
                 appendToHistoryFile(history_line);
+                if (chat_history.size() > MAX_HISTORY_LINES) {
+                    chat_history.erase(chat_history.begin());
+                }
 
                 // Запуск неблокирующего ожидания Ack: запомнить, что ждём его
                 PendingAck ack_state{};
@@ -759,6 +771,9 @@ bool handle_user(int socket_fd) {
                 outgoing_message.payload = input_buffer;
                 outgoing_message.delivered = false;
                 undelivered_messages.push_back(outgoing_message);
+                if (undelivered_messages.size() > MAX_UNDELIVERED_MESSAGES) {
+                    undelivered_messages.erase(undelivered_messages.begin());
+                }
             }
 
             input_buffer.clear();

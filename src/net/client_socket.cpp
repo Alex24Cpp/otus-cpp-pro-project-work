@@ -4,8 +4,10 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 
 #include "net/raii_socket.h"
@@ -17,23 +19,33 @@ namespace messenger::net {
 // ---------- Создание клиентского сокета ----------
 
 Socket create_client_socket(std::string_view host, uint16_t port) {
-    int sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) utils::throw_system_error("socket");
+    const int socket_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0) {
+        utils::throw_system_error("socket");
+    }
 
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    // Передача владение в RAII сразу после проверки
+    Socket client_socket(socket_fd);
 
-    if (inet_pton(AF_INET, host.data(), &addr.sin_addr) <= 0)
+    sockaddr_in server_addr{};
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, host.data(), &server_addr.sin_addr) <= 0) {
         throw std::runtime_error("Недопустимый хост: " + std::string(host));
+    }
 
     std::cout << "Подключение к " << host << ":" << port << "...\n";
 
-    if (connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
+    if (connect(client_socket.fd_return(),
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                reinterpret_cast<sockaddr*>(&server_addr),
+                sizeof(server_addr)) < 0) {
         utils::throw_system_error("connect");
+    }
 
     std::cout << "Подключено.\n";
-    return Socket(sock);
+    return client_socket;
 }
 
 }  // namespace messenger::net

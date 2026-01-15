@@ -1,10 +1,18 @@
 #include "app/p2p_chat.h"
 
+// NOLINTBEGIN(modernize-deprecated-headers)
+#include <signal.h>
+// NOLINTEND(modernize-deprecated-headers)
 #include <sys/select.h>
+// NOLINTBEGIN(misc-include-cleaner)
+#include <sys/time.h>  // timeval
+// NOLINTEND(misc-include-cleaner)
 #include <termios.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -86,8 +94,12 @@ int ping_retry_count = 0;
 
 std::vector<OutgoingMessage> undelivered_messages{};
 
+// Для ведения истории сообщений
 std::vector<std::string> chat_history{};
 const std::string history_file_path = "chat_history.txt";
+
+// Флаг завершения из обработчика сигналов
+std::atomic<bool> shutdown_requested = false;
 // NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
 
 // Включение raw‑mode терминала
@@ -135,8 +147,7 @@ public:
 
 // Обработчик сигналов завершения
 void handleExitSignal([[maybe_unused]] int signal_number) {
-    disableRawMode();
-    std::exit(1);
+    shutdown_requested.store(true, std::memory_order_relaxed);
 }
 
 // Перерисовка строки ввода
@@ -469,20 +480,40 @@ auto checkPingWatchdog(int socket_fd) -> bool {
 }
 
 void wait_for_events(int sock_fd, fd_set& readfds) {
-    FD_ZERO(&readfds);
-    FD_SET(sock_fd, &readfds);
-    FD_SET(STDIN_FILENO, &readfds);
+    while (true) {
+        FD_ZERO(&readfds);
+        FD_SET(sock_fd, &readfds);
+        FD_SET(STDIN_FILENO, &readfds);
 
-    const int max_fd = std::max(sock_fd, STDIN_FILENO);
+        const int max_fd = std::max(sock_fd, STDIN_FILENO);
 
-    // Таймаут, чтобы периодически будиться для Ping/Ack‑таймеров
-    timeval t_v{};
-    t_v.tv_sec = 0;
-    t_v.tv_usec = SELECT_TIMEOUT_USEC;  // 500 мс
+        // Таймаут, чтобы периодически будиться для Ping/Ack‑таймеров
+        timeval t_v{};
+        t_v.tv_sec = 0;
+        t_v.tv_usec = SELECT_TIMEOUT_USEC;  // 500 мс
 
-    const int ret = ::select(max_fd + 1, &readfds, nullptr, nullptr, &t_v);
-    if (ret < 0) {
-        messenger::utils::throw_system_error("select");
+        const int ret = ::select(max_fd + 1, &readfds, nullptr, nullptr, &t_v);
+
+        if (ret < 0) {
+            if (errno == EINTR) {
+                if (shutdown_requested.load(std::memory_order_relaxed)) {
+                    FD_ZERO(&readfds);
+                    return;  // EINTR по Ctrl-C - выход и далее завершение
+                             // приложения
+                }
+                continue;  // повторить select()
+            }
+
+            if (errno == EAGAIN) {  // некретичная ошибка
+                FD_ZERO(&readfds);
+                return;  // пробудиться без событий
+            }
+            // реальная ошибка select()
+            messenger::utils::throw_system_error("select");
+        }
+
+        // выход с ret == 0 (таймаут) или > 0 (по событию)
+        return;
     }
 }
 
@@ -651,11 +682,27 @@ bool handle_user(int socket_fd) {
 void chat_loop(messenger::net::Socket sock) {
     const int fd_sock = sock.fd_return();
 
-    // Устанавить обработчики сигналов
-    std::signal(SIGINT, handleExitSignal);   // Ctrl-C
-    std::signal(SIGTERM, handleExitSignal);  // kill
-    std::signal(SIGSEGV, handleExitSignal);  // segmentation fault
-    std::signal(SIGABRT, handleExitSignal);  // abort()
+    // Установить обработчики сигналов
+    {
+        struct sigaction sig_action {};
+        sig_action.sa_handler = handleExitSignal;  // новый обработчик
+        sigemptyset(&sig_action.sa_mask);
+        sig_action.sa_flags = SA_RESTART;  // автоматически перезапускать
+                                           // системные вызовы после сигнала
+
+        sigaction(SIGINT, &sig_action, nullptr);   // Ctrl-C
+        sigaction(SIGTERM, &sig_action, nullptr);  // kill
+        sigaction(SIGSEGV, &sig_action, nullptr);  // segmentation fault
+        sigaction(SIGABRT, &sig_action, nullptr);  // abort()
+
+        // Обработчик SIGPIPE, чтобы send() не убивал процесс при записи в
+        // закрытый сокет
+        struct sigaction sig_action_ign {};
+        sig_action_ign.sa_handler = SIG_IGN;  // Игнорировать SIGPIPE
+        sigemptyset(&sig_action_ign.sa_mask);
+        sig_action_ign.sa_flags = 0;
+        sigaction(SIGPIPE, &sig_action_ign, nullptr);
+    }
 
     const TerminalRawGuard term_guard;
 
@@ -665,7 +712,7 @@ void chat_loop(messenger::net::Socket sock) {
               << "Команда выхода: /выход или /exit, а также Ctrl-D.\n\n";
     redrawInput();
 
-    while (true) {
+    while (!shutdown_requested.load(std::memory_order_relaxed)) {
         fd_set readfds;
         wait_for_events(fd_sock, readfds);
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -15,7 +16,7 @@ namespace messenger::net {
 
 namespace {
 
-constexpr std::size_t header_size = 1 + 4 + 4;
+constexpr std::size_t HEADER_SIZE = 1 + 4 + 4;
 
 [[nodiscard]]
 auto recv_some(int socket_fd, std::vector<std::uint8_t>& buffer,
@@ -29,6 +30,12 @@ auto recv_some(int socket_fd, std::vector<std::uint8_t>& buffer,
                                 bytes_to_read - total_received, 0);
 
         if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
             utils::throw_system_error("recv");
         }
 
@@ -59,6 +66,12 @@ auto send_bytes(int socket_fd, const std::vector<std::uint8_t>& data) -> bool {
         ret = ::send(socket_fd, chunk_ptr, chunk_size, 0);
 
         if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
             utils::throw_system_error("send");
         }
 
@@ -78,16 +91,22 @@ auto recv_bytes(int socket_fd, std::vector<std::uint8_t>& out) -> bool {
     out.clear();
 
     std::vector<std::uint8_t> header(
-        header_size);  // вектор из header_size элементов
+        HEADER_SIZE);  // вектор из HEADER_SIZE элементов
     std::size_t received_header{0};
 
-    while (received_header < header_size) {
+    while (received_header < HEADER_SIZE) {
         const auto ret =
             ::recv(socket_fd,
                    header.data() + static_cast<std::ptrdiff_t>(received_header),
-                   header_size - received_header, 0);
+                   HEADER_SIZE - received_header, 0);
 
         if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                break;
+            }
             utils::throw_system_error("recv");
         }
 
@@ -119,7 +138,7 @@ auto recv_bytes(int socket_fd, std::vector<std::uint8_t>& out) -> bool {
         return false;
     }
 
-    out.resize(header_size + static_cast<std::size_t>(payload_size));
+    out.resize(HEADER_SIZE + static_cast<std::size_t>(payload_size));
     std::copy(header.begin(), header.end(), out.begin());
 
     if (payload_size == 0) {
@@ -128,11 +147,11 @@ auto recv_bytes(int socket_fd, std::vector<std::uint8_t>& out) -> bool {
 
     const std::size_t bytes_to_read = static_cast<std::size_t>(payload_size);
     const std::size_t received_payload =
-        recv_some(socket_fd, out, header_size, bytes_to_read);
+        recv_some(socket_fd, out, HEADER_SIZE, bytes_to_read);
 
     // Если payload неполный (обрыв соединения), вернуть true и
     // частичный фрейм — решение валидно ли сообщение за протоколом
-    const std::size_t actual_size = header_size + received_payload;
+    const std::size_t actual_size = HEADER_SIZE + received_payload;
     out.resize(actual_size);
 
     return true;

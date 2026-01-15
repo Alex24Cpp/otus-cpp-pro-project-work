@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -74,7 +75,7 @@ struct OutgoingMessage {
 };
 
 // NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
-std::optional<PendingAck> pending_ack{};
+std::unordered_map<std::uint32_t, PendingAck> pending_acks{};
 
 bool typing_sent = false;
 
@@ -216,7 +217,7 @@ void resendMessage(int socket_fd, OutgoingMessage& outgoing_message) {
         Clock::now() + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
     ack_state.retry_count = 0;
     ack_state.last_payload = outgoing_message.payload;
-    pending_ack = ack_state;
+    pending_acks[new_message_id] = ack_state;
 
     std::cout << "\n[Повторная отправка msg_id=" << new_message_id << "]\n";
 }
@@ -367,80 +368,173 @@ auto handleIncomingMessage(int sock_fd,
     }
 }
 
+// void checkAckTimeout(int socket_fd) {
+//     if (!pending_ack) {
+//         return;
+//     }
+
+//     const auto now = Clock::now();
+//     if (now < pending_ack->deadline) {
+//         return;
+//     }
+
+//     // ===== 1. Обычные ретраи до MAX_MESSAGE_RETRIES - 1 =====
+//     if (pending_ack->retry_count < MAX_MESSAGE_RETRIES - 1) {
+//         if (!messenger::proto::send_text(socket_fd,
+//         pending_ack->last_payload,
+//                                          pending_ack->id)) {
+//             std::cout
+//                 << "\n[Ошибка: сообщение не удалось повторно отправить]\n";
+//             pending_ack.reset();
+//             return;
+//         }
+
+//         pending_ack->retry_count += 1;
+//         pending_ack->deadline = now +
+//         std::chrono::seconds(ACK_TIMEOUT_SECONDS);
+
+//         std::cout << "\n[Повторная отправка msg_id=" << pending_ack->id
+//                   << ", попытка " << pending_ack->retry_count << "]\n";
+//         return;
+//     }
+
+//     // ===== 2. Инициировать Ping/Pong-проверку перед последним ретраем =====
+//     if (!pending_ack->ping_for_ack_requested) {
+//         // Форсировать отправку Ping в ближайшем цикле watchdog'а
+//         last_ping_time = now - std::chrono::seconds(PING_INTERVAL_SECONDS);
+//         ping_retry_count = 0;
+
+//         pending_ack->ping_for_ack_requested = true;
+//         pending_ack->deadline = now +
+//         std::chrono::seconds(ACK_TIMEOUT_SECONDS); return;
+//     }
+
+//     // ===== 3. После успешного Ping/Pong — выполнить последний ретрай =====
+//     if (pending_ack->retry_count == MAX_MESSAGE_RETRIES - 1) {
+//         if (!messenger::proto::send_text(socket_fd,
+//         pending_ack->last_payload,
+//                                          pending_ack->id)) {
+//             std::cout
+//                 << "\n[Ошибка: сообщение не удалось отправить повторно]\n";
+//             pending_ack.reset();
+//             return;
+//         }
+
+//         pending_ack->retry_count += 1;  // retry_count == MAX_MESSAGE_RETRIES
+//         pending_ack->deadline = now +
+//         std::chrono::seconds(ACK_TIMEOUT_SECONDS);
+
+//         std::cout << "\n[Последняя попытка отправки msg_id=" <<
+//         pending_ack->id
+//                   << "]\n";
+//         return;
+//     }
+
+//     // ===== 4. В этой точке:
+//     //  - обычные ретраи исчерпаны,
+//     //  - Ping/Pong-проверка уже инициирована,
+//     //  - последний ретрай выполнен,
+//     //  - checkPingWatchdog() не заявил о потере соединения,
+//     //  - но ACK так и не пришёл.
+//     std::cout << "\n[Сообщение msg_id=" << pending_ack->id
+//               << " НЕ доставлено (таймаут)]\n";  // в дальнейшем логирование
+
+//     for (auto& outgoing_message : undelivered_messages) {
+//         if (outgoing_message.message_id == pending_ack->id) {
+//             outgoing_message.delivered = false;
+//             break;
+//         }
+//     }
+
+//     pending_ack.reset();
+// }
+
+////////////////////////
 void checkAckTimeout(int socket_fd) {
-    if (!pending_ack) {
-        return;
-    }
-
     const auto now = Clock::now();
-    if (now < pending_ack->deadline) {
-        return;
-    }
+    std::vector<std::uint32_t> remove_ids;
 
-    // ===== 1. Обычные ретраи до MAX_MESSAGE_RETRIES - 1 =====
-    if (pending_ack->retry_count < MAX_MESSAGE_RETRIES - 1) {
-        if (!messenger::proto::send_text(socket_fd, pending_ack->last_payload,
-                                         pending_ack->id)) {
-            std::cout
-                << "\n[Ошибка: сообщение не удалось повторно отправить]\n";
-            pending_ack.reset();
-            return;
+    for (auto& pair_item : pending_acks) {
+        const std::uint32_t msg_id = pair_item.first;
+        PendingAck& ack_state = pair_item.second;
+
+        if (now < ack_state.deadline) {
+            continue;
         }
 
-        pending_ack->retry_count += 1;
-        pending_ack->deadline = now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
+        // ===== 1. Обычные ретраи до MAX_MESSAGE_RETRIES - 1 =====
+        if (ack_state.retry_count < MAX_MESSAGE_RETRIES - 1) {
+            if (!messenger::proto::send_text(socket_fd, ack_state.last_payload,
+                                             ack_state.id)) {
+                std::cout
+                    << "\n[Ошибка: сообщение не удалось повторно отправить]\n";
+                remove_ids.push_back(msg_id);
+                continue;
+            }
 
-        std::cout << "\n[Повторная отправка msg_id=" << pending_ack->id
-                  << ", попытка " << pending_ack->retry_count << "]\n";
-        return;
-    }
+            ack_state.retry_count += 1;
+            ack_state.deadline =
+                now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
 
-    // ===== 2. Инициировать Ping/Pong-проверку перед последним ретраем =====
-    if (!pending_ack->ping_for_ack_requested) {
-        // Форсировать отправку Ping в ближайшем цикле watchdog'а
-        last_ping_time = now - std::chrono::seconds(PING_INTERVAL_SECONDS);
-        ping_retry_count = 0;
-
-        pending_ack->ping_for_ack_requested = true;
-        pending_ack->deadline = now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
-        return;
-    }
-
-    // ===== 3. После успешного Ping/Pong — выполнить последний ретрай =====
-    if (pending_ack->retry_count == MAX_MESSAGE_RETRIES - 1) {
-        if (!messenger::proto::send_text(socket_fd, pending_ack->last_payload,
-                                         pending_ack->id)) {
-            std::cout
-                << "\n[Ошибка: сообщение не удалось отправить повторно]\n";
-            pending_ack.reset();
-            return;
+            std::cout << "\n[Повторная отправка msg_id=" << ack_state.id
+                      << ", попытка " << ack_state.retry_count << "]\n";
+            continue;
         }
 
-        pending_ack->retry_count += 1;  // retry_count == MAX_MESSAGE_RETRIES
-        pending_ack->deadline = now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
+        // ===== 2. Инициировать Ping/Pong-проверку перед последним ретраем
+        // =====
+        if (!ack_state.ping_for_ack_requested) {
+            // Форсировать отправку Ping в ближайшем цикле watchdog'а
+            last_ping_time = now - std::chrono::seconds(PING_INTERVAL_SECONDS);
+            ping_retry_count = 0;
 
-        std::cout << "\n[Последняя попытка отправки msg_id=" << pending_ack->id
-                  << "]\n";
-        return;
-    }
-
-    // ===== 4. В этой точке:
-    //  - обычные ретраи исчерпаны,
-    //  - Ping/Pong-проверка уже инициирована,
-    //  - последний ретрай выполнен,
-    //  - checkPingWatchdog() не заявил о потере соединения,
-    //  - но ACK так и не пришёл.
-    std::cout << "\n[Сообщение msg_id=" << pending_ack->id
-              << " НЕ доставлено (таймаут)]\n";  // в дальнейшем логирование
-
-    for (auto& outgoing_message : undelivered_messages) {
-        if (outgoing_message.message_id == pending_ack->id) {
-            outgoing_message.delivered = false;
-            break;
+            ack_state.ping_for_ack_requested = true;
+            ack_state.deadline =
+                now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
+            continue;
         }
+
+        // ===== 3. После успешного Ping/Pong — выполнить последний ретрай =====
+        if (ack_state.retry_count == MAX_MESSAGE_RETRIES - 1) {
+            if (!messenger::proto::send_text(socket_fd, ack_state.last_payload,
+                                             ack_state.id)) {
+                std::cout
+                    << "\n[Ошибка: сообщение не удалось отправить повторно]\n";
+                remove_ids.push_back(msg_id);
+                continue;
+            }
+
+            ack_state.retry_count += 1;  // retry_count == MAX_MESSAGE_RETRIES
+            ack_state.deadline =
+                now + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
+
+            std::cout << "\n[Последняя попытка отправки msg_id=" << ack_state.id
+                      << "]\n";
+            continue;
+        }
+
+        // ===== 4. В этой точке:
+        //  - обычные ретраи исчерпаны,
+        //  - Ping/Pong-проверка уже инициирована,
+        //  - последний ретрай выполнен,
+        //  - checkPingWatchdog() не заявил о потере соединения,
+        //  - но ACK так и не пришёл.
+        std::cout << "\n[Сообщение msg_id=" << ack_state.id
+                  << " НЕ доставлено (таймаут)]\n";  // в дальнейшем логирование
+
+        for (auto& outgoing_message : undelivered_messages) {
+            if (outgoing_message.message_id == ack_state.id) {
+                outgoing_message.delivered = false;
+                break;
+            }
+        }
+
+        remove_ids.push_back(msg_id);
     }
 
-    pending_ack.reset();
+    for (std::uint32_t id_value : remove_ids) {
+        pending_acks.erase(id_value);
+    }
 }
 
 [[nodiscard]]
@@ -539,7 +633,8 @@ bool handle_peer(int socket_fd) {
 
     // Обработка Ack: проверка на ожидаемый id
     if (msg.type == messenger::proto::MsgType::Ack) {
-        if (pending_ack && msg.id == pending_ack->id) {
+        auto ack_it = pending_acks.find(msg.id);
+        if (ack_it != pending_acks.end()) {
             clearInputLine();
             std::cout << "\n[Сообщение msg_id=" << msg.id << " доставлено]\n";
             redrawInput();
@@ -551,7 +646,7 @@ bool handle_peer(int socket_fd) {
                 }
             }
 
-            pending_ack.reset();
+            pending_acks.erase(ack_it);
             return true;
         }
         // Ack с другим id — игнорируем (или можно логировать)
@@ -567,11 +662,31 @@ bool handle_peer(int socket_fd) {
 
 bool handle_user(int socket_fd) {
     char key{};
-    const auto bytes_read = ::read(STDIN_FILENO, &key, 1);
-    if (bytes_read <= 0) {
-        std::cout << "\n[Системный EOF или ошибка на stdin. НЕ выходим]\n";
-        // логировать
-        return true;
+    // const auto bytes_read = ::read(STDIN_FILENO, &key, 1);
+    // if (bytes_read <= 0) {
+    //     std::cout << "\n[Системный EOF или ошибка на stdin. НЕ выходим]\n";
+    //     // логировать
+    //     return true;
+    // }
+    ssize_t bytes_read{0};
+    while (true) {
+        bytes_read = ::read(STDIN_FILENO, &key, 1);
+        if (bytes_read < 0) {
+            if (errno == EINTR) {
+                if (shutdown_requested.load(std::memory_order_relaxed)) {
+                    return false;
+                }
+                continue;
+            }
+            std::cout << "\n[Ошибка чтения stdin]\n";
+            return true;
+        }
+        break;
+    }
+
+    if (bytes_read == 0) {
+        std::cout << "\n[Системный EOF на stdin]\n";
+        return false;
     }
 
     // ====== ВЫХОД ПО ОСОБЫМ КЛАВИШАМ ======
@@ -583,7 +698,7 @@ bool handle_user(int socket_fd) {
 
     // Ctrl-C — обрабатывается через обработчик сигнала SIGINT
     // (handleExitSignal), поэтому здесь символ '\x03' мы не ловим. В raw-mode
-    // он обычно не доходит как символ, а сразу превращается в сигнал.
+    // он не доходит как символ, а сразу превращается в сигнал.
 
     // ====== ENTER ======
     if (key == '\n' || key == '\r') {
@@ -637,7 +752,7 @@ bool handle_user(int socket_fd) {
                     Clock::now() + std::chrono::seconds(ACK_TIMEOUT_SECONDS);
                 ack_state.retry_count = 0;
                 ack_state.last_payload = input_buffer;
-                pending_ack = ack_state;
+                pending_acks[msg_id] = ack_state;
 
                 OutgoingMessage outgoing_message{};
                 outgoing_message.message_id = msg_id;

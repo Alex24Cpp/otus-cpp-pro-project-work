@@ -106,7 +106,7 @@ std::vector<std::string> chat_history{};
 const std::string history_file_path = "chat_history.txt";
 
 // Флаг завершения из обработчика сигналов
-std::atomic<bool> shutdown_requested = false;
+volatile sig_atomic_t shutdown_requested = 0;
 // NOLINTEND(cppcoreguidelines-avoid-non-const-global-variables)
 
 // Включение raw‑mode терминала
@@ -154,7 +154,7 @@ public:
 
 // Обработчик сигналов завершения
 void handleExitSignal([[maybe_unused]] int signal_number) {
-    shutdown_requested.store(true, std::memory_order_relaxed);
+    shutdown_requested = 1;
 }
 
 // Перерисовка строки ввода
@@ -207,6 +207,9 @@ void eraseLastUtf8Char(std::string& text) {
 
 void resendMessage(int socket_fd, OutgoingMessage& outgoing_message) {
     const std::uint32_t new_message_id = generateMessageId();
+
+    // Удалить старый pending_acks, чтобы не остались "висящие" ретраи
+    pending_acks.erase(outgoing_message.message_id);
 
     if (!messenger::proto::send_text(socket_fd, outgoing_message.payload,
                                      new_message_id)) {
@@ -517,7 +520,7 @@ void wait_for_events(int sock_fd, fd_set& readfds) {
 
         if (ret < 0) {
             if (errno == EINTR) {
-                if (shutdown_requested.load(std::memory_order_relaxed)) {
+                if (shutdown_requested != 0) {
                     FD_ZERO(&readfds);
                     return;  // EINTR по Ctrl-C - выход и далее завершение
                              // приложения
@@ -594,7 +597,7 @@ bool handle_user(int socket_fd) {
         bytes_read = ::read(STDIN_FILENO, &key, 1);
         if (bytes_read < 0) {
             if (errno == EINTR) {
-                if (shutdown_requested.load(std::memory_order_relaxed)) {
+                if (shutdown_requested != 0) {
                     return false;
                 }
                 continue;
@@ -757,7 +760,7 @@ void chat_loop(messenger::net::Socket sock) {
               << "Команда выхода: /выход или /exit, а также Ctrl-D.\n\n";
     redrawInput();
 
-    while (!shutdown_requested.load(std::memory_order_relaxed)) {
+    while (shutdown_requested == 0) {
         fd_set readfds;
         wait_for_events(fd_sock, readfds);
 

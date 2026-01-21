@@ -105,7 +105,7 @@ auto recv_bytes(int socket_fd, std::vector<std::uint8_t>& out) -> bool {
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                break;
+                continue;
             }
             utils::throw_system_error("recv");
         }
